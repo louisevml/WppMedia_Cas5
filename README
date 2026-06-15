@@ -1,0 +1,173 @@
+# WPPmedia — Générateur de présentations PowerPoint
+
+Pipeline Python qui génère automatiquement un `.pptx` à partir d'un fichier Excel de résultats d'étude et de deux gabarits PowerPoint.
+
+| Fichier               | Rôle                                                                     |
+|-----------------------|--------------------------------------------------------------------------|
+| `default.pptx`        | Présentation cible vide (thème + masques). Rechargée à chaque exécution. |
+| `template_slide.pptx` | Banque de 6 slides témoin à dupliquer.                                   |
+
+---
+
+## Structure du projet
+
+```
+WPPmedia/
+├── main.py
+├── requirements.txt
+├── app/
+│   ├── app_ppt_WPP.py       # Orchestrateur
+│   ├── mapping.py           # Lecture de l'onglet « mapping »
+│   ├── slide_data.py        # Parsing des onglets slide_N
+│   ├── chart_builder.py     # Insertion des graphiques
+│   ├── chart_styles.py      # Couleurs, légende, axes, labels
+│   └── slide_templates.py   # Gestion des gabarits
+├── assets/templates/
+│   ├── default.pptx
+│   └── template_slide.pptx
+├── data/
+│   └── resultats_WPPmedia_test.xlsx
+└── output/
+```
+
+---
+
+## Installation
+
+```bash
+python -m venv .venv
+.venv\Scripts\Activate.ps1          # Windows PowerShell
+pip install -r requirements.txt
+```
+
+## Utilisation
+
+```bash
+python main.py
+```
+
+Le fichier généré est déposé dans `output/` avec la date du jour dans le nom.
+
+---
+
+## Fonctionnement — construction du deck
+
+Le pipeline lit l'onglet `mapping` et groupe les lignes par `no_slide`.  
+Pour chaque position `1..N` :
+
+| Lignes avec ce `no_slide`          | Slide insérée                                         |
+|------------------------------------|-------------------------------------------------------|
+| 0 (absent)                         | `title_section` (titre de section automatique)        |
+| 1 — `chart_type` contient `vertical`| `graph_verti`                                        |
+| 1 — sinon                          | `graph_hori`                                          |
+| 2 / 3 / 4                          | `slide_2_graphs` / `slide_3_graphs` / `slide_4_graphs`|
+
+Les graphiques sont remplis dans l'ordre des lignes. Si `split_charts_by` est utilisé, une seule ligne génère plusieurs graphiques (un par valeur unique de la dimension choisie, plafonné à 4).
+
+---
+
+## Préparer le fichier Excel
+
+Le fichier doit contenir deux types d'onglets.
+
+### Onglet `mapping`
+
+Chaque ligne décrit un graphique.
+
+| Colonne           | Obligatoire | Description                                                                          |
+|-------------------|:-----------:|--------------------------------------------------------------------------------------|
+| `no_slide`        |   **oui**   | Numéro de la slide cible                                                             |
+| `chart_type`      |     non     | Type de graphique (défaut : `bar_clustered_vertical`)                                |
+| `axis_layout`     |   **oui**   | Structure catégories × séries (voir ci-dessous)                                      |
+| `filter_brand`    |    cond.    | Filtre sur la col A. Vide ou `all` = toutes les marques                              |
+| `filter_modalite` |    cond.    | Filtre sur la col B. Vide ou `all` = toutes les modalités                            |
+| `filter_segment`  |    cond.    | Filtre sur les colonnes C-N. Vide ou `all` = tous les segments                       |
+| `column_pct`      |     non     | `total` = % total ; sinon `colonnes` (défaut)                                        |
+| `sort_order`      |     non     | `asc`, `desc`, `none`, ou vide (auto : `desc` vertical / `asc` horizontal)           |
+| `sort_by`         |     non     | Série de référence du tri (nom ou index 0-based). Vide = première série              |
+| `titre_graphique` |     non     | Titre affiché. `{value}` insère la valeur courante si `split_charts_by` est actif    |
+| `series_order`    |     non     | Ordre explicite des séries, séparé par virgules                                      |
+| `split_charts_by` |     non     | Génère un graphique par valeur de `segment`, `brand` ou `modality`                   |
+
+### `axis_layout` — choisir la structure du graphique
+
+Le fichier Excel comporte **3 dimensions** : **marques** (col A), **modalités** (col B), **segments** (colonnes C-N).  
+Pour chaque graphique, deux dimensions sont choisies (catégories × séries), la troisième **doit être filtrée à une seule valeur** via le `filter_*` correspondant.
+
+Format : `"{catégories}_x_{séries}"`
+
+| `axis_layout`          | Catégories | Séries    | Filtre requis      |
+|------------------------|------------|-----------|--------------------|
+| `brands_x_modalites`   | marques    | modalités | `filter_segment`   |
+| `brands_x_segments`    | marques    | segments  | `filter_modalite`  |
+| `modalites_x_brands`   | modalités  | marques   | `filter_segment`   |
+| `modalites_x_segments` | modalités  | segments  | `filter_brand`     |
+| `segments_x_brands`    | segments   | marques   | `filter_modalite`  |
+| `segments_x_modalites` | segments   | modalités | `filter_brand`     |
+
+> **Exception** : si la dimension à filtrer n'a qu'une seule valeur dans les données, le filtre n'est pas obligatoire.
+
+**Matching des filtres** (cascade insensible à la casse) : exact → préfixe → contenance.  
+Ex. : `filter_segment = "Ensemble"` matche « Ensemble 18-70 ans ».
+
+#### Pie / donut
+
+Préférer un `axis_layout` dont la **1re partie est `modalites`** (les parts = niveaux d'opinion).  
+Exemple : `modalites_x_brands` + `filter_brand` = une marque + `split_charts_by = segment` → un donut par cible.  
+Éviter les layouts qui produisent plusieurs séries pour un camembert (rendu incohérent).
+
+### Onglets `slide_1`, `slide_2`, …
+
+Un onglet de données par slide :
+- **Lignes 1-3** : en-têtes (noms des segments)
+- **À partir de la ligne 4** : données — col A = marque (héritée si vide), col B = modalité, colonnes suivantes = effectifs et % en blocs de 3 colonnes par segment
+
+---
+
+## Types de graphiques
+
+| `chart_type`                 | Description                            |
+|------------------------------|----------------------------------------|
+| `bar_clustered_vertical`     | Histogramme groupé vertical *(défaut)* |
+| `bar_clustered_horizontal`   | Histogramme groupé horizontal          |
+| `bar_stacked_100_vertical`   | Colonnes empilées à 100 %              |
+| `bar_stacked_100_horizontal` | Barres empilées à 100 %                |
+| `doughnut`                   | Anneau (donut)                         |
+| `pie`                        | Camembert                              |
+
+---
+
+## Styles visuels
+
+Définis dans `app/chart_styles.py` :
+- Palette par défaut (4 séries) : vert, rouge, bleu, violet
+- Palette empilée 100 % : dégradé de verts + gris
+- Taille des polices, couleurs des labels, positionnement de la légende
+
+---
+
+## Recréer `default.pptx`
+
+Après modification de `template_slide.pptx`, régénérer le fichier default pour le garder synchronisé :
+
+```bash
+.venv\Scripts\python scripts\rebuild_default_from_template.py
+```
+
+Cela écrase `assets/templates/default.pptx`.
+
+## Dépannage
+
+| Erreur                                      | Solution                                                                           |
+|---------------------------------------------|------------------------------------------------------------------------------------|
+| `Fichier Excel introuvable`                 | Vérifier que le fichier est dans `data/`                                           |
+| `Template introuvable`                      | Vérifier que `template.pptx` est dans `assets/`                                    |
+| `Onglet « mapping » absent`                 | Nommer l'onglet exactement `mapping`                                               |
+| `Onglet « slide_N » absent`                 | Créer un onglet `slide_N` pour chaque `no_slide` du mapping                        |
+| `chart_type inconnu`                        | Utiliser un des 6 noms du tableau ci-dessus                                        |
+| `axis_layout manquant ou vide`              | Renseigner une des 6 valeurs valides                                               |
+| `la dimension X doit être filtrée`          | Renseigner le `filter_*` correspondant à la dimension non utilisée                 |
+| `filter_X ne correspond à aucune valeur`    | Le message d'erreur liste les valeurs disponibles                                  |
+| `sort_order invalide`                       | Valeurs : `asc`, `desc`, `none`, ou vide                                           |
+| `sort_by ne correspond à aucune série`      | Le message d'erreur liste les séries disponibles                                   |
+| `Placeholder chart introuvable`             | Le template doit contenir un placeholder chart (idx=12) sur chaque slide           |
